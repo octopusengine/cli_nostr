@@ -3,12 +3,15 @@
   "relays_path": "nostr/relays.json",
   "friends_path": "data/friends.json",
   "db_path": "data/nostr_msg.db",
-  "stream_db_path": "data/stream.db",
+  "stream_db_path": "data/nostr_stream.db",
+  "follows_db_path": "data/nostr_follows.db",
   "db_limit": 100,
   "stream_channel": "My notes",
   "num_msg_relays": 3,
   "msg_timeout": 100,
   "msg_lookback": 259200,
+  "follow_stream_timeout": 100,
+  "save_stream_to_db": true,
   "timeout": 8,
   "verbose": false
 }

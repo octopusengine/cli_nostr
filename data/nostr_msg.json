@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "table": "nostr_messages",
+  "columns": [
+    {"field": "uid", "type": "INTEGER", "constraints": ["PRIMARY KEY AUTOINCREMENT"]},
+    {"field": "saved_at", "type": "TEXT", "constraints": ["NOT NULL"]},
+    {"field": "direction", "type": "TEXT", "constraints": ["NOT NULL", "CHECK(direction IN ('sent', 'received'))"]},
+    {"field": "relay", "type": "TEXT", "constraints": ["NOT NULL"]},
+    {"field": "event_id", "type": "TEXT", "constraints": ["NOT NULL", "UNIQUE"]},
+    {"field": "rumor_id", "type": "TEXT", "constraints": ["NOT NULL"]},
+    {"field": "rumor_created_at", "type": "INTEGER", "constraints": []},
+    {"field": "sender_pubkey", "type": "TEXT", "constraints": ["NOT NULL"]},
+    {"field": "recipient_pubkey", "type": "TEXT", "constraints": ["NOT NULL"]},
+    {"field": "friend_name", "type": "TEXT", "constraints": ["NOT NULL", "DEFAULT ''"]},
+    {"field": "content", "type": "TEXT", "constraints": ["NOT NULL"]},
+    {"field": "delivery_status", "type": "TEXT", "constraints": ["NOT NULL"]}
+  ],
+  "indexes": [
+    {"name": "idx_nostr_messages_saved_at", "columns": ["saved_at DESC", "uid DESC"]},
+    {"name": "idx_nostr_messages_rumor_id", "columns": ["rumor_id"]}
+  ],
+  "migrations": {}
+}

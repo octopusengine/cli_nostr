@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "columns": [
+    {"field": "uid", "name": "id", "width": 5},
+    {"field": "saved_at", "name": "saved", "width": 14},
+    {"field": "direction", "name": "direction", "width": 9},
+    {"field": "friend_name", "name": "friend", "width": 16},
+    {"field": "content", "name": "content", "width": 48},
+    {"field": "delivery_status", "name": "status", "width": 12}
+  ]
+}

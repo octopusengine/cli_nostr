@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "columns": [
+    {"field": "uid", "name": "id", "width": 5},
+    {"field": "created_at", "name": "created", "width": 14},
+    {"field": "channel_id", "name": "channel", "width": 14},
+    {"field": "group_id", "name": "group", "width": 14},
+    {"field": "content", "name": "content", "width": 48}
+  ]
+}
