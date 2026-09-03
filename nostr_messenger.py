@@ -75,6 +75,15 @@ def startup_rows(args: argparse.Namespace, show_all: bool) -> list[object]:
     return [row for row in rows if row["direction"] == "received" and not row["handled_at"] and not row["replied_at"]]
 
 
+def recent_rows(args: argparse.Namespace) -> list[object]:
+    """Return the compact newest-first view shown after a receive operation."""
+
+    try:
+        return list_messages(args.db, args.messenger_recent_limit)
+    except (NostrMessageDatabaseError, OSError, ValueError) as error:
+        raise cli.CliNostrError(str(error)) from error
+
+
 def print_rows(rows: list[object], *, heading: str) -> None:
     print(heading)
     if not rows:
@@ -112,20 +121,6 @@ def handle_message(args: argparse.Namespace, uid: int) -> bool:
         return True
     args.msg_reply = (uid, answer)
     cli.reply_to_message(args)
-    return True
-
-
-def handle_pending_messages(args: argparse.Namespace, rows: list[object]) -> bool:
-    """Offer the reply flow only for incoming messages not already handled."""
-
-    for row in rows:
-        if row["direction"] != "received" or row["handled_at"] or row["replied_at"]:
-            continue
-        print(f"\n--- pending message #{row['uid']} ---")
-        if not handle_message(args, int(row["uid"])):
-            return False
-        if getattr(args, "wait_immediately", False):
-            return True
     return True
 
 
@@ -468,12 +463,10 @@ def run(options: argparse.Namespace) -> int:
 
     initial = startup_rows(args, show_all)
     print_rows(initial, heading="Saved messages:" if show_all else "Pending received messages:")
-    if not handle_pending_messages(args, initial):
-        return 0
 
     while True:
         if not getattr(args, "wait_immediately", False):
-            command = read_choice("\nEnter=wait | /status | /pending | /help | /exit: ")
+            command = read_choice("\nEnter=wait | /show ID | /status | /help | /exit: ")
             if command:
                 result = execute_command(args, command)
                 if result is False:
@@ -497,9 +490,8 @@ def run(options: argparse.Namespace) -> int:
         if not rows:
             print("No new message saved.")
             continue
-        print_rows(rows, heading="New message:")
-        if not handle_pending_messages(args, rows):
-            return 0
+        print(f"New message(s) saved. Showing up to {args.messenger_recent_limit} newest records; use /show ID for details.")
+        print_rows(recent_rows(args), heading="Recent messages (newest first):")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

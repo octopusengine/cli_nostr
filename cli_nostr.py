@@ -505,6 +505,7 @@ def apply_setup(args: argparse.Namespace) -> None:
     args.stream_db = _setup_path(setup, "stream_db_path", DEFAULT_NOSTR_STREAM_DATABASE_PATH)
     args.follows_db = _setup_path(setup, "follows_db_path", DEFAULT_NOSTR_FOLLOWS_DATABASE_PATH)
     args.db_limit = _setup_positive_int(setup, "db_limit", 100)
+    args.messenger_recent_limit = _setup_positive_int(setup, "messenger_recent_limit", 20)
     args.num_msg_relays = _setup_positive_int(setup, "num_msg_relays", 3)
     args.msg_timeout = _setup_positive_number(setup, "msg_timeout", 100)
     lookback = setup.get("msg_lookback", 3 * 24 * 60 * 60)
