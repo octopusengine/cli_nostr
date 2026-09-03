@@ -22,7 +22,7 @@ from lib import wrapp_nostr as nostr
 from lib.wrapp_terminal import Terminal
 
 
-__version__ = "0.2.4"
+__version__ = "0.2.5"
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 LIBRARY_DIR = PROJECT_ROOT / "lib"
@@ -1160,8 +1160,20 @@ def receive_friend_messages(args: argparse.Namespace) -> int:
 def sync_friend_messages(args: argparse.Namespace) -> int:
     """Fetch and save the configured NIP-17 history window, without live waiting."""
 
+    try:
+        from lib.wrapp_nostr_db import NostrMessageDatabaseError, message_event_ids
+
+        before = message_event_ids(args.db)
+    except (NostrMessageDatabaseError, OSError, ValueError) as error:
+        raise CliNostrError(str(error)) from error
     args.sync_history = True
-    return receive_friend_messages(args)
+    result = receive_friend_messages(args)
+    try:
+        after = message_event_ids(args.db)
+    except (NostrMessageDatabaseError, OSError, ValueError) as error:
+        raise CliNostrError(str(error)) from error
+    print(f"Sync complete: {len(after - before)} message(s) added to local database.")
+    return result
 
 
 def stream_events(args: argparse.Namespace) -> int:

@@ -26,7 +26,7 @@ from lib.wrapp_nostr_db import (
 from lib.wrapp_terminal import Terminal
 
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 
 def build_parser() -> argparse.ArgumentParser:

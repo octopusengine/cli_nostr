@@ -212,6 +212,7 @@ python cli_nostr.py --sync -v
 ```
 
 The messenger equivalent is `/sync`.
+It ends with the exact number of messages newly added to the local database.
 
 ## Integration preparation
 
