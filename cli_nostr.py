@@ -582,8 +582,36 @@ def event_time_utc(timestamp: object) -> str:
     return nostr.event_time_utc(timestamp)
 
 
+STREAM_HASHTAG_RE = re.compile(r"(?<!\w)#[^\s#]+")
+
+
+def highlight_stream_hashtags(content: object, terminal: Terminal, base_color: str | None = None) -> str:
+    """Highlight hashtag-shaped text, preserving an optional color for other text."""
+
+    value = str(content)
+    pieces: list[str] = []
+    position = 0
+    for match in STREAM_HASHTAG_RE.finditer(value):
+        pieces.append(terminal.style(value[position:match.start()], fg=base_color))
+        pieces.append(terminal.style(match.group(), fg="y"))
+        position = match.end()
+    pieces.append(terminal.style(value[position:], fg=base_color))
+    return "".join(pieces)
+
+
 def print_stream_event(event: object, number: int) -> None:
-    nostr.print_stream_event(event, number)
+    """Print one public stream event with its hashtags highlighted."""
+
+    terminal = Terminal()
+    hashtags = nostr.event_hashtags(event)
+    rendered_hashtags = ", ".join(terminal.style(f"#{hashtag.lstrip('#')}", fg="y") for hashtag in hashtags)
+    print(f"\n--- message {number} ---")
+    print(f"time:    {event_time_utc(getattr(event, 'created_at', None))}")
+    print(f"author:  {getattr(event, 'pubkey', '?')}")
+    print(f"event:   {getattr(event, 'id', '?')}")
+    print(f"hashtags: {rendered_hashtags or '-'}")
+    print("content:")
+    print(highlight_stream_hashtags(getattr(event, "content", ""), terminal))
 
 
 def load_friends(path: Path) -> dict[str, str]:
@@ -1177,6 +1205,17 @@ def sync_friend_messages(args: argparse.Namespace) -> int:
     return result
 
 
+def stream_hashtag(value: str) -> str:
+    """Normalize one Nostr hashtag argument to its ``t``-tag value."""
+
+    hashtag = value.strip()
+    if hashtag.startswith("#"):
+        hashtag = hashtag[1:]
+    if not hashtag or not re.fullmatch(r"[^\s#]+", hashtag):
+        raise argparse.ArgumentTypeError("HASHTAG must be one word, optionally beginning with #.")
+    return hashtag
+
+
 def stream_events(args: argparse.Namespace) -> int:
     """Fetch up to three recent public kind-1 notes from the first live relay."""
 
@@ -1208,11 +1247,15 @@ def stream_events(args: argparse.Namespace) -> int:
     loop = tornado_ioloop.IOLoop()
     relay = None
 
+    hashtag = args.stream or None
+
     def on_message(message_json: list[object]) -> None:
         nonlocal relay
         message_type = message_json[0] if message_json else None
         if message_type == RelayMessageType.EVENT and len(message_json) >= 3:
             event = Event.from_dict(message_json[2])
+            if not stream_filter.matches(event):
+                return
             event_id = str(event.id)
             if event_id not in seen_ids:
                 seen_ids.add(event_id)
@@ -1225,7 +1268,11 @@ def stream_events(args: argparse.Namespace) -> int:
                 print(f"Relay NOTICE: {message_json[1]}")
 
     try:
-        filters = FiltersList([Filters(kinds=[1], limit=3)])
+        stream_filter = Filters(kinds=[1], limit=3)
+        if hashtag:
+            # NIP-01 generic tag queries use the "#t" filter key for hashtags.
+            stream_filter.add_arbitrary_tag("t", [hashtag])
+        filters = FiltersList([stream_filter])
         relay = Relay(
             relay_url,
             MessagePool(first_response_only=False),
@@ -1239,7 +1286,10 @@ def stream_events(args: argparse.Namespace) -> int:
         if args.verbose:
             print(f"Stream relay:      {relay_url}")
             print(f"Subscription ID:   {subscription_id}")
-            print("Filtr:             kind 1, limit 3")
+            filter_description = "kind 1, limit 3"
+            if hashtag:
+                filter_description += f", #t={hashtag}"
+            print(f"Filtr:             {filter_description}")
         loop.run_sync(relay.connect, timeout=args.timeout + 2)
     except gen.TimeoutError:
         if args.verbose:
@@ -1300,8 +1350,20 @@ def follow_stream_timeout(args: argparse.Namespace) -> float:
     return float(value)
 
 
+def follow_stream_days(value: str) -> int:
+    """Parse the optional positive history window accepted by ``--follow-stream``."""
+
+    try:
+        days = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("DAYS must be a positive whole number.") from error
+    if days < 1:
+        raise argparse.ArgumentTypeError("DAYS must be a positive whole number.")
+    return days
+
+
 def follow_stream(args: argparse.Namespace) -> int:
-    """Stream and save newly arriving events authored by local follows."""
+    """Fetch an optional follow history window, then stream and save new events."""
 
     authors, author_names = followed_authors(args)
     relay_urls = select_live_relays(args, message_relay_limit(args))
@@ -1321,11 +1383,15 @@ def follow_stream(args: argparse.Namespace) -> int:
         _Relay,
     ) = nostr_runtime()
     timeout = follow_stream_timeout(args)
-    filters = FiltersList([Filters(authors=authors, since=int(time.time()))])
+    history_days = args.follow_stream
+    now = int(time.time())
+    since = now - history_days * 24 * 60 * 60 if history_days else now
+    filters = FiltersList([Filters(authors=authors, since=since)])
     loop = tornado_ioloop.IOLoop()
     sockets: dict[str, object] = {}
     seen_ids: set[str] = set()
     received_count = 0
+    terminal = Terminal()
 
     def show_event(event: object, relay_url: str) -> None:
         nonlocal received_count
@@ -1337,13 +1403,13 @@ def follow_stream(args: argparse.Namespace) -> int:
         author = str(event.pubkey)
         record_stream_event(args, relay_url, event)
         print(f"\n--- follow event {received_count} ---")
-        print(f"follow:  {author_names.get(author, author)}")
-        print(f"relay:   {relay_url}")
-        print(f"time:    {event_time_utc(event.created_at)}")
-        print(f"kind:    {event.kind}")
+        follow_name = terminal.style(author_names.get(author, author), fg="y")
+        print(f"follow:  {follow_name} | relay:   {relay_url}")
+        print(f"time:    {event_time_utc(event.created_at)} | kind:    {event.kind}")
         print(f"event:   {event_id}")
         print("content:")
-        print(event.content)
+        if event.content:
+            print(highlight_stream_hashtags(event.content, terminal, base_color="g"))
 
     def on_message(message_json: list[object], relay_url: str) -> None:
         if not message_json or message_json[0] != "EVENT" or len(message_json) < 3:
@@ -1396,7 +1462,10 @@ def follow_stream(args: argparse.Namespace) -> int:
     try:
         for index, relay_url in enumerate(relay_urls, start=1):
             loop.spawn_callback(connect_relay, relay_url, f"cli-nostr-follows-{index}-{uuid.uuid4().hex}")
-        print(f"Following {len(authors)} account(s) for {timeout:g} s")
+        if history_days:
+            print(f"Fetching events from the previous {history_days} day(s), then following {len(authors)} account(s) for {timeout:g} s")
+        else:
+            print(f"Following {len(authors)} account(s) for {timeout:g} s")
         print(f"Relays: {', '.join(relay_urls)}")
         print("Press Ctrl+C to stop.")
         loop.call_later(timeout, stop_listening)
@@ -1684,7 +1753,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="create PROFILE with NAME and private-key ENV_VAR",
     )
     action.add_argument("-c", "--connect", action="store_true", help="check WebSocket connections to relays")
-    action.add_argument("-s", "--stream", action="store_true", help="fetch three public kind-1 Nostr messages")
+    action.add_argument(
+        "-s",
+        "--stream",
+        nargs="?",
+        type=stream_hashtag,
+        const=False,
+        default=None,
+        metavar="HASHTAG",
+        help="fetch up to three public kind-1 notes; optionally filter by #HASHTAG",
+    )
     action.add_argument(
         "--event",
         metavar="TEXT|FILE|-",
@@ -1711,7 +1789,16 @@ def build_parser() -> argparse.ArgumentParser:
     action.add_argument("--db-show", type=int, metavar="ID", help="show a stream event by its --db-str #ID")
     action.add_argument("--flw-add", nargs=2, metavar=("NAME", "PUBKEY"), help="add or update a follow")
     action.add_argument("--db-flw", action="store_true", help="list saved follows")
-    action.add_argument("-f", "--follow-stream", action="store_true", help="stream new events from every saved follow")
+    action.add_argument(
+        "-f",
+        "--follow-stream",
+        nargs="?",
+        type=follow_stream_days,
+        const=0,
+        default=None,
+        metavar="DAYS",
+        help="stream saved follows; optionally fetch DAYS of history first",
+    )
     parser.add_argument("--env", type=Path, default=DEFAULT_ENV_PATH, metavar="PATH", help=".env file (default: .env)")
     parser.add_argument(
         "--user",
@@ -1747,7 +1834,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return doctor(args)
     if args.connect:
         return connect_relays(args)
-    if args.stream:
+    if args.stream is not None:
         return stream_events(args)
     if args.event is not None:
         return publish_public_event(args)
@@ -1777,7 +1864,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return add_follow(args)
     if args.db_flw:
         return list_follows_database(args)
-    if args.follow_stream:
+    if args.follow_stream is not None:
         return follow_stream(args)
     parser.error("No action was selected.")
     return 2

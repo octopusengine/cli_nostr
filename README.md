@@ -52,6 +52,7 @@ python cli_nostr.py --db-show 1
 python cli_nostr.py --flw-add holinky npub1…
 python cli_nostr.py --db-flw
 python cli_nostr.py --follow-stream
+python cli_nostr.py --follow-stream 3
 ```
 
 `--key-create` stores a randomly generated, valid secp256k1 private key as
@@ -102,8 +103,15 @@ reachable relay and prints its three most recent public kind-1 messages.
 ```powershell
 python cli_nostr.py -c -v
 python cli_nostr.py -s -v
+python cli_nostr.py -s '#nostr'
 python cli_nostr.py -V
 ```
+
+`-s` accepts an optional hashtag such as `'#nostr'` (the quotes prevent
+PowerShell from treating `#` as a comment). This asks the relay for the Nostr
+standard `#t` tag filter and displays only notes carrying the corresponding
+`["t", "nostr"]` tag. Notes that merely contain `#nostr` as untagged text are
+not included.
 
 ## Private message to a friend
 
@@ -234,13 +242,18 @@ not cause the CLI to send messages automatically.
 case-insensitive unique; a repeated `--flw-add` updates the existing entry.
 `-f` / `--follow-stream` opens a live subscription for all stored follows,
 prints and saves every newly received Nostr event, and stops after
-`follow_stream_timeout` seconds (100 by default in `cli_nostr.json`).
+`follow_stream_timeout` seconds (100 by default in `cli_nostr.json`). Give it
+an optional positive whole number of days to also request stored events from
+that preceding period before it continues with the live stream; for example,
+`-f 3` includes the last three days and `-f 14` the last fourteen days.
 Set `save_stream_to_db` to `false` in `cli_nostr.json` to keep both public
 stream commands terminal-only without writing `nostr_stream.db`.
 
 ```powershell
 python cli_nostr.py --flw-add holinky npub1…
 python cli_nostr.py --db-flw
+python cli_nostr.py -f 3
+python cli_nostr.py -f 14
 ```
 
 The versioned base SQL definitions are `data_nostr/nostr_msg.json`,

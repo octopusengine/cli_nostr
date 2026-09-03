@@ -179,13 +179,31 @@ def event_time_utc(timestamp: object) -> str:
         return "unknown time"
 
 
+def event_hashtags(event: object) -> list[str]:
+    """Return distinct Nostr ``t``-tag values in their event order."""
+
+    hashtags: list[str] = []
+    raw_tags = getattr(event, "tags", [])
+    if isinstance(raw_tags, list):
+        for tag in raw_tags:
+            if not isinstance(tag, (list, tuple)) or len(tag) < 2 or tag[0] != "t" or not isinstance(tag[1], str):
+                continue
+            hashtag = tag[1].strip()
+            if hashtag and hashtag not in hashtags:
+                hashtags.append(hashtag)
+    return hashtags
+
+
 def print_stream_event(event: object, number: int) -> None:
     """Print the public fields of one kind-1 event."""
+
+    hashtags = event_hashtags(event)
 
     print(f"\n--- message {number} ---")
     print(f"time:    {event_time_utc(getattr(event, 'created_at', None))}")
     print(f"author:  {getattr(event, 'pubkey', '?')}")
     print(f"event:   {getattr(event, 'id', '?')}")
+    print(f"hashtags: {', '.join(hashtags) if hashtags else '-'}")
     print("content:")
     print(getattr(event, "content", ""))
 
