@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "table": "stream_events",
+  "columns": [
+    {"field": "uid", "type": "INTEGER", "constraints": ["PRIMARY KEY AUTOINCREMENT"]},
+    {"field": "saved_at", "type": "TEXT", "constraints": ["NOT NULL"]},
+    {"field": "relay", "type": "TEXT", "constraints": ["NOT NULL"]},
+    {"field": "event_id", "type": "TEXT", "constraints": ["NOT NULL", "UNIQUE"]},
+    {"field": "created_at", "type": "INTEGER", "constraints": []},
+    {"field": "kind", "type": "INTEGER", "constraints": ["NOT NULL"]},
+    {"field": "tags", "type": "TEXT", "constraints": ["NOT NULL"]},
+    {"field": "group_id", "type": "TEXT", "constraints": ["NOT NULL", "DEFAULT ''"]},
+    {"field": "channel_id", "type": "TEXT", "constraints": ["NOT NULL", "DEFAULT ''"]},
+    {"field": "author_pubkey", "type": "TEXT", "constraints": ["NOT NULL"]},
+    {"field": "content", "type": "TEXT", "constraints": ["NOT NULL"]},
+    {"field": "event_json", "type": "TEXT", "constraints": ["NOT NULL", "DEFAULT '{}'"]}
+  ],
+  "indexes": [
+    {"name": "idx_stream_events_created_at", "columns": ["created_at DESC", "uid DESC"]},
+    {"name": "idx_stream_events_group_id", "columns": ["group_id", "created_at DESC"]},
+    {"name": "idx_stream_events_channel_id", "columns": ["channel_id", "created_at DESC"]}
+  ],
+  "migrations": {
+    "stream_events": {
+      "kind": "INTEGER NOT NULL DEFAULT 1",
+      "tags": "TEXT NOT NULL DEFAULT '[]'",
+      "group_id": "TEXT NOT NULL DEFAULT ''",
+      "channel_id": "TEXT NOT NULL DEFAULT ''",
+      "event_json": "TEXT NOT NULL DEFAULT '{}'"
+    }
+  }
+}

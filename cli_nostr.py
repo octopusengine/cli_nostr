@@ -22,19 +22,19 @@ from lib import wrapp_nostr as nostr
 from lib.wrapp_terminal import Terminal
 
 
-__version__ = "0.2.0"
+__version__ = "0.2.4"
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 LIBRARY_DIR = PROJECT_ROOT / "lib"
 DEFAULT_ENV_PATH = Path(".env")
-DEFAULT_RELAYS_PATH = Path("nostr") / "relays.json"
-DEFAULT_PROFILES_PATH = Path("nostr") / "profiles.json"
+DEFAULT_RELAYS_PATH = Path("data_nostr") / "relays.json"
+DEFAULT_PROFILES_PATH = Path("data_nostr") / "profiles.json"
 DEFAULT_PROFILE_NAME = "user1"
-DEFAULT_FRIENDS_PATH = Path("data") / "friends.json"
+DEFAULT_FRIENDS_PATH = Path("data_nostr") / "friends.json"
 DEFAULT_SETUP_PATH = Path("cli_nostr.json")
-DEFAULT_NOSTR_MESSAGES_DATABASE_PATH = Path("data") / "nostr_msg.db"
-DEFAULT_NOSTR_STREAM_DATABASE_PATH = Path("data") / "nostr_stream.db"
-DEFAULT_NOSTR_FOLLOWS_DATABASE_PATH = Path("data") / "nostr_follows.db"
+DEFAULT_NOSTR_MESSAGES_DATABASE_PATH = Path("data_nostr") / "nostr_msg.db"
+DEFAULT_NOSTR_STREAM_DATABASE_PATH = Path("data_nostr") / "nostr_stream.db"
+DEFAULT_NOSTR_FOLLOWS_DATABASE_PATH = Path("data_nostr") / "nostr_follows.db"
 # The order of the secp256k1 group. A valid Nostr secret is in [1, order).
 SECP256K1_ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 ENV_ASSIGNMENT = re.compile(r"^(?P<prefix>\s*(?:export\s+)?)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=.*$")
@@ -48,6 +48,7 @@ class UserProfile:
     name: str
     pub_key: str
     priv_key_name: str
+    dm_relays: tuple[str, ...]
 
 
 # The CLI owns presentation; Nostr helpers supply the shared error type.
@@ -95,8 +96,8 @@ def used_library_modules() -> list[Path]:
         if not isinstance(statement, ast.ImportFrom):
             continue
         if statement.module == "lib":
-            module_names.update(alias.name for alias in statement.names if alias.name.startswith("wrapp_"))
-        elif statement.module and statement.module.startswith("lib.wrapp_"):
+            module_names.update(alias.name for alias in statement.names if alias.name.startswith("wrapp_") or alias.name == "nostr_runner")
+        elif statement.module and (statement.module.startswith("lib.wrapp_") or statement.module == "lib.nostr_runner"):
             module_names.add(statement.module.removeprefix("lib."))
     return [LIBRARY_DIR / f"{name}.py" for name in sorted(module_names) if (LIBRARY_DIR / f"{name}.py").is_file()]
 
@@ -150,6 +151,112 @@ def list_message_database(args: argparse.Namespace) -> int:
     for row, line in zip(rows, lines):
         terminal.print("g" if row["direction"] == "sent" else "c", line)
     return 0
+
+
+def show_message(args: argparse.Namespace) -> int:
+    """Print one complete direct-message record and its handling lifecycle."""
+
+    try:
+        from lib.wrapp_nostr_db import NostrMessageDatabaseError, get_message
+
+        row = get_message(args.db, args.db_msg_show)
+    except (NostrMessageDatabaseError, OSError, ValueError) as error:
+        raise CliNostrError(str(error)) from error
+    if row is None:
+        raise CliNostrError(f"Message #{args.db_msg_show} was not found in {args.db}.")
+
+    terminal = Terminal()
+    labels = {
+        "uid": "Local message ID",
+        "saved_at": "Received/saved",
+        "handled_at": "Handled at",
+        "handling_report": "Handling report",
+        "replied_at": "Replied at",
+        "reply_event_id": "Reply event ID",
+        "reply_status": "Reply status",
+        "reply_content": "Reply content",
+    }
+    for field in row.keys():
+        value = row[field]
+        if field == "uid":
+            value = f"#{value}"
+        if value in (None, ""):
+            value = "-"
+        print(f"{terminal.style(labels.get(field, field), fg='y')}: {terminal.style(str(value), fg='w')}")
+    return 0
+
+
+def mark_message_done(args: argparse.Namespace) -> int:
+    """Mark one received message as handled and save a concise outcome report."""
+
+    uid, report = args.msg_done
+    try:
+        from lib.wrapp_nostr_db import NostrMessageDatabaseError, mark_message_handled
+
+        mark_message_handled(args.db, uid, report)
+    except (NostrMessageDatabaseError, OSError, ValueError) as error:
+        raise CliNostrError(str(error)) from error
+    print(f"Message #{uid} marked as handled.")
+    return 0
+
+
+def reply_to_message(args: argparse.Namespace) -> int:
+    """Send a NIP-17 reply to the sender of a handled incoming message."""
+
+    uid, message = args.msg_reply
+    if not message.strip():
+        raise CliNostrError("Reply text must not be empty.")
+    try:
+        from lib.wrapp_nostr_db import NostrMessageDatabaseError, get_message, record_message_reply
+
+        row = get_message(args.db, uid)
+    except (NostrMessageDatabaseError, OSError, ValueError) as error:
+        raise CliNostrError(str(error)) from error
+    if row is None:
+        raise CliNostrError(f"Message #{uid} was not found in {args.db}.")
+    if row["direction"] != "received":
+        raise CliNostrError("Only a received message can be replied to by local message ID.")
+    if not row["handled_at"]:
+        raise CliNostrError(f"Message #{uid} must first be marked handled with --msg-done.")
+    if row["replied_at"] and not args.force:
+        raise CliNostrError(f"Message #{uid} already has a recorded reply; use --force to send another one.")
+
+    relay_urls = select_live_relays(args, message_relay_limit(args))
+    if not relay_urls:
+        print("No configured relay is available.", file=sys.stderr)
+        return 3
+    sender_value = get_env_value(args.key_env, args.env)
+    if not sender_value:
+        raise CliNostrError(f"{args.key_env} is not set in {args.env} or the environment.")
+    try:
+        from lib.nostr_runner import NostrRunnerError, send_nip17_message
+
+        result = send_nip17_message(
+            normalize_private_key(sender_value), str(row["sender_pubkey"]), message, relay_urls,
+            timeout=args.timeout, verbose=args.verbose,
+        )
+        record_message_reply(
+            args.db, uid, event_id=result.recipient_event_id, status=result.delivery_status, content=message,
+        )
+    except (NostrRunnerError, NostrMessageDatabaseError, OSError, TypeError, ValueError) as error:
+        raise CliNostrError(str(error)) from error
+
+    record_local_message(
+        args,
+        direction="sent",
+        relay=", ".join(result.confirmed_relays or relay_urls),
+        event_id=result.recipient_event_id,
+        rumor_id=result.rumor_id,
+        rumor_created_at=result.rumor_created_at,
+        sender_pubkey=result.sender_pubkey,
+        recipient_pubkey=result.recipient_pubkey,
+        friend_name=str(row["friend_name"] or ""),
+        content=message,
+        delivery_status=result.delivery_status,
+    )
+    print(f"Reply to message #{uid}: {result.delivery_status}")
+    print(f"Recipient event: {result.recipient_event_id}")
+    return 0 if result.confirmed_relays else 3
 
 
 def record_stream_event(args: argparse.Namespace, relay_url: str, event: object) -> None:
@@ -329,13 +436,22 @@ def load_profiles(path: Path) -> dict[str, UserProfile]:
         name = raw_profile.get("name")
         pub_key = raw_profile.get("pub_key")
         priv_key_name = raw_profile.get("priv_key_name")
+        raw_dm_relays = raw_profile.get("dm_relays", [])
         if not isinstance(name, str) or not name.strip():
             raise CliNostrError(f"Profile {identifier!r} requires a non-empty name.")
         if not isinstance(pub_key, str) or not pub_key.startswith("npub1"):
             raise CliNostrError(f"Profile {identifier!r} requires an npub public key.")
         if not isinstance(priv_key_name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", priv_key_name):
             raise CliNostrError(f"Profile {identifier!r} has an invalid priv_key_name.")
-        profiles[identifier] = UserProfile(identifier, name.strip(), pub_key, priv_key_name)
+        if not isinstance(raw_dm_relays, list) or not raw_dm_relays:
+            raise CliNostrError(f"Profile {identifier!r} requires a non-empty dm_relays list.")
+        dm_relays: list[str] = []
+        for relay_url in raw_dm_relays:
+            if not isinstance(relay_url, str) or not relay_url.startswith(("ws://", "wss://")):
+                raise CliNostrError(f"Profile {identifier!r} has an invalid DM relay: {relay_url!r}")
+            if relay_url not in dm_relays:
+                dm_relays.append(relay_url)
+        profiles[identifier] = UserProfile(identifier, name.strip(), pub_key, priv_key_name, tuple(dm_relays))
     return profiles
 
 
@@ -626,6 +742,105 @@ def publish_public_event(args: argparse.Namespace) -> int:
     return 0 if confirmed else 3
 
 
+def publish_dm_relay_list(args: argparse.Namespace) -> int:
+    """Publish the active profile's NIP-17 DM inbox relay list (kind 10050)."""
+
+    try:
+        from pynostr.event import Event
+        from pynostr.key import PrivateKey
+    except ModuleNotFoundError as error:
+        raise CliNostrError("Install event dependencies with: python -m pip install -r requirements.txt") from error
+    private_value = get_env_value(args.key_env, args.env)
+    if not private_value:
+        raise CliNostrError(f"{args.key_env} is not set in {args.env} or the environment.")
+    secret = normalize_private_key(private_value)
+    private_key = PrivateKey.from_hex(secret)
+    if private_key.public_key.bech32() != args.pub_key:
+        raise CliNostrError(
+            f"Profile {args.user_profile.identifier!r} public key does not match {args.key_env}; "
+            "correct profiles.json or select the matching profile."
+        )
+    inbox_relays = list(args.user_profile.dm_relays)
+    publish_relays = select_live_relays(args, len(configured_relays(args)))
+    if not publish_relays:
+        print("No configured relay is available.", file=sys.stderr)
+        return 3
+    event = Event(
+        pubkey=private_key.public_key.hex(),
+        kind=10050,
+        tags=[["relay", relay_url] for relay_url in inbox_relays],
+        content="",
+    )
+    event.sign(secret)
+    statuses_by_relay = {
+        relay_url: nostr.publish_events(relay_url, [event], args.timeout, args.verbose)
+        for relay_url in publish_relays
+    }
+    event_id = str(event.id)
+    confirmed = 0
+    print(f"Profile: {args.user_profile.identifier} ({args.user_profile.name})")
+    print("NIP-17 DM inbox relays:")
+    for relay_url in inbox_relays:
+        print(f"  {relay_url}")
+    print(f"Relay list event (kind 10050): {event_id}")
+    for relay_url, statuses in statuses_by_relay.items():
+        status = statuses[event_id]
+        is_confirmed = status["ok"] is True
+        confirmed += int(is_confirmed)
+        print(f"{relay_url}: {'confirmed' if is_confirmed else 'unconfirmed'} | {status['detail']}")
+    print(f"Confirmed relays: {confirmed}/{len(publish_relays)}")
+    return 0 if confirmed else 3
+
+
+def inspect_dm_inbox(args: argparse.Namespace) -> int:
+    """Inspect NIP-17 gift-wrap IDs without decrypting or saving a message."""
+
+    try:
+        from lib.nostr_runner import NostrRunnerError, inspect_nip17_inbox
+        from lib.wrapp_nostr_db import NostrMessageDatabaseError, message_event_ids
+
+        recipient_pubkey = friend_public_key(args.user_profile.pub_key).hex()
+        known_event_ids = message_event_ids(args.db)
+        since = max(0, int(time.time()) - message_lookback_seconds(args))
+        reports = inspect_nip17_inbox(
+            recipient_pubkey,
+            args.user_profile.dm_relays,
+            since=since,
+            timeout=args.timeout,
+        )
+    except (NostrRunnerError, NostrMessageDatabaseError, OSError, TypeError, ValueError) as error:
+        raise CliNostrError(str(error)) from error
+
+    print("NIP-17 inbox inspection (read-only; no decryption and no database writes)")
+    print(f"Profile: {args.user_profile.identifier} ({args.user_profile.name})")
+    print(f"Public key (hex): {recipient_pubkey}")
+    print(f"Lookback: {message_lookback_seconds(args)} s since {event_time_utc(since)}")
+    returned_ids: set[str] = set()
+    available = 0
+    for report in reports:
+        if report.error:
+            print(f"{report.relay_url}: error | {report.error}")
+            continue
+        available += 1
+        ids = set(report.event_ids)
+        returned_ids.update(ids)
+        stored = ids & known_event_ids
+        absent = ids - known_event_ids
+        print(
+            f"{report.relay_url}: {len(ids)} envelope(s) returned | "
+            f"{len(stored)} present in local DB | {len(absent)} not in local DB"
+        )
+        if absent:
+            print(f"  Not in local DB: {', '.join(sorted(absent))}")
+    stored_total = returned_ids & known_event_ids
+    absent_total = returned_ids - known_event_ids
+    print(
+        f"Unique envelopes: {len(returned_ids)} returned | {len(stored_total)} present in local DB | "
+        f"{len(absent_total)} not in local DB"
+    )
+    return 0 if available else 3
+
+
 def send_friend_message(args: argparse.Namespace) -> int:
     """Encrypt and publish a NIP-17 direct message to a named friend."""
 
@@ -643,40 +858,29 @@ def send_friend_message(args: argparse.Namespace) -> int:
         print("No configured relay is available.", file=sys.stderr)
         return 3
 
-    try:
-        from pynostr.key import PrivateKey
-        from nostr import nip17
-    except ModuleNotFoundError as error:
-        raise CliNostrError(
-            "Install message dependencies with: python -m pip install -r requirements.txt"
-        ) from error
     sender_value = get_env_value(args.key_env, args.env)
     if not sender_value:
         raise CliNostrError(f"{args.key_env} is not set in {args.env} or the environment.")
-    sender_key = PrivateKey.from_hex(normalize_private_key(sender_value))
-    recipient_key = friend_public_key(recipient_value)
-    recipient_hex = recipient_key.hex()
-    relay_hint = relay_urls[0]
-    rumor, _seal, recipient_wrap = nip17.make_gift_wrap(
-        sender_key, recipient_hex, message, relay_url=relay_hint
-    )
-    _sender_rumor, _sender_seal, sender_wrap = nip17.make_sender_copy(
-        sender_key, recipient_hex, message, relay_url=relay_hint, rumor=rumor
-    )
+    try:
+        from lib.nostr_runner import NostrRunnerError, send_nip17_message
+
+        result = send_nip17_message(
+            normalize_private_key(sender_value), recipient_value, message, relay_urls,
+            timeout=args.timeout, verbose=args.verbose,
+        )
+    except (NostrRunnerError, OSError, TypeError, ValueError) as error:
+        raise CliNostrError(str(error)) from error
 
     print(f"NIP-17 message for: {name}")
     print(f"Relays: {', '.join(relay_urls)}")
-    print(f"Recipient: {recipient_key.bech32()}")
+    print(f"Recipient: {result.recipient_npub}")
     if args.verbose:
         print(f"Requested relay count: {relay_limit}")
         print(f"Text length: {len(message.encode('utf-8'))} B")
-        print(f"Recipient gift wrap: {recipient_wrap.id}")
-        print(f"Sender gift wrap:    {sender_wrap.id}")
+        print(f"Recipient gift wrap: {result.recipient_event_id}")
+        print(f"Sender gift wrap:    {result.sender_copy_event_id}")
 
-    statuses_by_relay = {
-        relay_url: nostr.publish_events(relay_url, [recipient_wrap, sender_wrap], args.timeout, args.verbose)
-        for relay_url in relay_urls
-    }
+    statuses_by_relay = result.relay_statuses
     confirmed = sum(
         status["ok"] is True
         for statuses in statuses_by_relay.values()
@@ -685,7 +889,7 @@ def send_friend_message(args: argparse.Namespace) -> int:
     expected = len(relay_urls) * 2
     recipient_confirmed = []
     for relay_url, statuses in statuses_by_relay.items():
-        recipient_status = statuses[str(recipient_wrap.id)]
+        recipient_status = statuses[result.recipient_event_id]
         if recipient_status["ok"] is True:
             recipient_confirmed.append(relay_url)
         for event_id, status in statuses.items():
@@ -696,24 +900,20 @@ def send_friend_message(args: argparse.Namespace) -> int:
         args,
         direction="sent",
         relay=", ".join(recipient_confirmed or relay_urls),
-        event_id=str(recipient_wrap.id),
-        rumor_id=str(rumor["id"]),
-        rumor_created_at=int(rumor["created_at"]),
-        sender_pubkey=sender_key.public_key.hex(),
-        recipient_pubkey=recipient_hex,
+        event_id=result.recipient_event_id,
+        rumor_id=result.rumor_id,
+        rumor_created_at=result.rumor_created_at,
+        sender_pubkey=result.sender_pubkey,
+        recipient_pubkey=result.recipient_pubkey,
         friend_name=name,
         content=message,
-        delivery_status=(
-            f"confirmed {len(recipient_confirmed)}/{len(relay_urls)}"
-            if recipient_confirmed
-            else "unconfirmed"
-        ),
+        delivery_status=result.delivery_status,
     )
     return 0 if recipient_confirmed else 3
 
 
 def receive_friend_messages(args: argparse.Namespace) -> int:
-    """Listen directly for fresh NIP-17 gift wraps without retaining a message pool."""
+    """Receive NIP-17 gift wraps, optionally stopping when relay history is complete."""
 
     sender_value = get_env_value(args.key_env, args.env)
     if not sender_value:
@@ -728,7 +928,7 @@ def receive_friend_messages(args: argparse.Namespace) -> int:
 
     try:
         from pynostr.key import PrivateKey
-        from nostr import nip17
+        from lib_nostr import nip17
     except ModuleNotFoundError as error:
         raise CliNostrError(
             "Install message-receiving dependencies with: python -m pip install -r requirements.txt"
@@ -749,10 +949,26 @@ def receive_friend_messages(args: argparse.Namespace) -> int:
     own_pubkey = private_key.public_key.hex()
     received_count = 0
     decrypt_errors = 0
-    seen_gift_wrap_ids: set[str] = set()
+    known_event_ids = getattr(args, "known_event_ids", ())
+    try:
+        from lib.wrapp_nostr_db import NostrMessageDatabaseError, message_event_ids
+
+        stored_event_ids = message_event_ids(args.db)
+    except (NostrMessageDatabaseError, OSError, ValueError) as error:
+        raise CliNostrError(str(error)) from error
+    seen_gift_wrap_ids: set[str] = {str(event_id) for event_id in known_event_ids}
+    seen_gift_wrap_ids.update(stored_event_ids)
+    stop_after_message = bool(getattr(args, "stop_after_message", False))
+    sync_history = bool(getattr(args, "sync_history", False))
     sockets: dict[str, object] = {}
+    connected_relays: set[str] = set()
+    pending_connections: set[str] = set(relay_urls)
+    completed_relays: set[str] = set()
     loop = tornado_ioloop.IOLoop()
     countdown_active = False
+    stopping = False
+    suppress_wait_output = bool(getattr(args, "suppress_wait_output", False))
+    cancel_event = getattr(args, "receive_cancel_event", None)
 
     def finish_countdown(*, show_zero: bool = False) -> None:
         nonlocal countdown_active
@@ -767,13 +983,21 @@ def receive_friend_messages(args: argparse.Namespace) -> int:
         if countdown_active:
             print(f"{remaining_tens} ", end="", flush=True)
 
+    def finish_sync_if_complete() -> None:
+        """Stop a history-only receive after every connected relay sent EOSE."""
+
+        if sync_history and not pending_connections and connected_relays <= completed_relays:
+            loop.add_callback(stop_listening)
+
     def on_message(message_json: list[object], relay_url: str) -> None:
         nonlocal received_count, decrypt_errors
         message_type = message_json[0] if message_json else None
         if message_type == RelayMessageType.END_OF_STORED_EVENTS:
+            completed_relays.add(relay_url)
             if args.verbose:
                 finish_countdown()
-                print(f"Relay ready for new messages: {relay_url}")
+                print(f"Relay history complete: {relay_url}")
+            finish_sync_if_complete()
             return
         if message_type == RelayMessageType.NOTICE:
             if args.verbose and len(message_json) >= 2:
@@ -815,21 +1039,34 @@ def receive_friend_messages(args: argparse.Namespace) -> int:
             content=str(rumor.get("content", "")),
             delivery_status="received",
         )
-        print(f"--- NIP-17 message {received_count} ---")
-        print(f"relay:   {relay_url}")
-        print(f"time:    {event_time_utc(gift_wrap.created_at)}")
-        print(f"sender:  {seal.pubkey}")
-        print(f"rumor:   {rumor.get('id', '?')}")
-        print("content:")
-        print(rumor.get("content", ""))
+        if not getattr(args, "suppress_received_output", False):
+            print(f"--- NIP-17 message {received_count} ---")
+            print(f"relay:   {relay_url}")
+            print(f"time:    {event_time_utc(gift_wrap.created_at)}")
+            print(f"sender:  {seal.pubkey}")
+            print(f"rumor:   {rumor.get('id', '?')}")
+            print("content:")
+            print(rumor.get("content", ""))
+        if stop_after_message:
+            loop.add_callback(stop_listening)
 
     def stop_listening() -> None:
+        nonlocal stopping
+        if stopping:
+            return
+        stopping = True
         finish_countdown(show_zero=True)
         for websocket in sockets.values():
             websocket.close()
         # Direct tornado sockets run without a periodic ping task. Leave one
         # loop turn for close frames, then stop exactly at msg_timeout.
         loop.call_later(0.05, loop.stop)
+
+    def stop_when_cancelled() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            stop_listening()
+        else:
+            loop.call_later(0.1, stop_when_cancelled)
 
     since = max(0, int(time.time()) - lookback)
     filters = FiltersList(
@@ -849,6 +1086,7 @@ def receive_friend_messages(args: argparse.Namespace) -> int:
                 ),
             )
             sockets[relay_url] = websocket
+            connected_relays.add(relay_url)
             websocket.write_message(request)
             if args.verbose:
                 finish_countdown()
@@ -857,6 +1095,9 @@ def receive_friend_messages(args: argparse.Namespace) -> int:
             if args.verbose:
                 finish_countdown()
                 print(f"Receiving connection failed for {relay_url}: {error!r}", file=sys.stderr)
+        finally:
+            pending_connections.discard(relay_url)
+            finish_sync_if_complete()
 
     def on_raw_message(message: object, relay_url: str) -> None:
         if message is None:
@@ -876,18 +1117,25 @@ def receive_friend_messages(args: argparse.Namespace) -> int:
     try:
         for index, relay_url in enumerate(relay_urls, start=1):
             loop.spawn_callback(connect_relay, relay_url, f"cli-nostr-dm-{index}-{uuid.uuid4().hex}")
-        print(f"Waiting for NIP-17 messages: {wait_timeout:g} s")
-        print(f"Relays: {', '.join(relay_urls)}")
-        print(f"Loading gift wraps since: {event_time_utc(since)}")
-        print("You can also stop receiving with Ctrl+C.")
-        whole_tens = int(wait_timeout // 10)
-        if whole_tens:
-            countdown_active = True
-            print("Countdown (×10 s): ", end="", flush=True)
-            for remaining_tens in range(whole_tens - 1, 0, -1):
-                delay = (whole_tens - remaining_tens) * 10
-                loop.call_later(delay, countdown_tick, remaining_tens)
+        if not suppress_wait_output:
+            if sync_history:
+                print("Syncing NIP-17 message history; stopping after relay history is complete.")
+            else:
+                print(f"Waiting for NIP-17 messages: {wait_timeout:g} s")
+            print(f"Relays: {', '.join(relay_urls)}")
+            print(f"Loading gift wraps since: {event_time_utc(since)}")
+            if not sync_history:
+                print("You can also stop receiving with Ctrl+C.")
+            whole_tens = int(wait_timeout // 10)
+            if whole_tens and not sync_history:
+                countdown_active = True
+                print("Countdown (×10 s): ", end="", flush=True)
+                for remaining_tens in range(whole_tens - 1, 0, -1):
+                    delay = (whole_tens - remaining_tens) * 10
+                    loop.call_later(delay, countdown_tick, remaining_tens)
         loop.call_later(wait_timeout, stop_listening)
+        if cancel_event is not None:
+            loop.call_later(0.1, stop_when_cancelled)
         loop.start()
     except KeyboardInterrupt:
         finish_countdown()
@@ -899,12 +1147,21 @@ def receive_friend_messages(args: argparse.Namespace) -> int:
         loop.close(all_fds=True)
 
     if received_count:
-        print(f"Messages received: {received_count}")
+        if not suppress_wait_output:
+            print(f"Messages received: {received_count}")
         return 0
-    print("No NIP-17 message was found in history or during the wait.")
-    if args.verbose and decrypt_errors:
+    if not suppress_wait_output:
+        print("No new decryptable NIP-17 message was found." if sync_history else "No NIP-17 message was found in history or during the wait.")
+    if (args.verbose or sync_history) and decrypt_errors and not suppress_wait_output:
         print(f"Undecryptable gift wraps: {decrypt_errors}")
     return 0
+
+
+def sync_friend_messages(args: argparse.Namespace) -> int:
+    """Fetch and save the configured NIP-17 history window, without live waiting."""
+
+    args.sync_history = True
+    return receive_friend_messages(args)
 
 
 def stream_events(args: argparse.Namespace) -> int:
@@ -1298,6 +1555,7 @@ def create_profile(args: argparse.Namespace) -> int:
         "name": name.strip(),
         "pub_key": npub,
         "priv_key_name": priv_key_name,
+        "dm_relays": load_relays(_setup_path(load_setup(DEFAULT_SETUP_PATH), "relays_path", DEFAULT_RELAYS_PATH)),
     }
     write_dotenv_value(args.env, priv_key_name, secret, replace=args.force)
     write_profiles_configuration(args.profiles, configuration)
@@ -1359,6 +1617,42 @@ def show_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def doctor(args: argparse.Namespace) -> int:
+    """Check local Nostr prerequisites without contacting relays or exposing keys."""
+
+    checks: list[tuple[str, bool, str]] = []
+    checks.append(("Profile", True, f"{args.user_profile.identifier} ({args.user_profile.name})"))
+    checks.append(("Private key", bool(get_env_value(args.key_env, args.env)), f"{args.key_env} in {args.env}"))
+    try:
+        relays = load_relays(args.relays)
+        checks.append(("Relay list", True, f"{len(relays)} relay(s): {args.relays}"))
+    except CliNostrError as error:
+        checks.append(("Relay list", False, str(error)))
+    try:
+        friends = load_friends(args.friends)
+        checks.append(("Friends list", True, f"{len(friends)} friend(s): {args.friends}"))
+    except CliNostrError as error:
+        checks.append(("Friends list", False, str(error)))
+    for label, path in (("Message database", args.db), ("Stream database", args.stream_db), ("Follows database", args.follows_db)):
+        checks.append((label, path.parent.is_dir(), f"{path} ({'exists' if path.exists() else 'created on first use'})"))
+    agent = load_setup(DEFAULT_SETUP_PATH).get("agent", {})
+    if isinstance(agent, dict):
+        enabled = agent.get("enabled", False)
+        allowed = agent.get("allowed_senders", [])
+        checks.append(("Agent policy", isinstance(enabled, bool) and isinstance(allowed, list),
+                       f"{'enabled' if enabled else 'disabled'}; {len(allowed) if isinstance(allowed, list) else '?'} allowed sender(s)"))
+    else:
+        checks.append(("Agent policy", False, "agent in cli_nostr.json must be an object"))
+
+    failed = 0
+    terminal = Terminal()
+    for label, ok, detail in checks:
+        terminal.print("g" if ok else "r", f"{'OK' if ok else 'ERROR'} {label}: {detail}")
+        failed += int(not ok)
+    print("Relay connectivity is not checked by --doctor; use --connect for that.")
+    return 0 if not failed else 3
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="cli_nostr – a unified CLI for local Nostr keys and relay actions."
@@ -1367,6 +1661,7 @@ def build_parser() -> argparse.ArgumentParser:
     action.add_argument("--key-create", action="store_true", help="generate and save the selected private key to .env")
     action.add_argument("--key-info", action="store_true", help="show the selected identity public key")
     action.add_argument("--config", action="store_true", help="show NOSTR configuration status without secrets")
+    action.add_argument("--doctor", action="store_true", help="check local Nostr setup without contacting relays")
     action.add_argument("-L", "--lib-version", action="store_true", help="show versions of local wrapper modules used by this CLI")
     action.add_argument("--examples", action="store_true", help="show command examples")
     action.add_argument(
@@ -1382,9 +1677,23 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TEXT|FILE|-",
         help="publish a public text event from literal TEXT, UTF-8 FILE, or stdin (-)",
     )
+    action.add_argument(
+        "--dm-relays-publish",
+        action="store_true",
+        help="publish the active profile's NIP-17 DM inbox relay list (kind 10050)",
+    )
+    action.add_argument(
+        "--dm-inbox",
+        action="store_true",
+        help="inspect NIP-17 gift-wrap IDs on the active profile's inbox relays without saving them",
+    )
     action.add_argument("-m", "--msg", nargs=2, metavar=("TO", "TEXT"), help="send a NIP-17 message to a friend")
     action.add_argument("-r", "--receive", action="store_true", help="wait for new NIP-17 messages")
+    action.add_argument("--sync", action="store_true", help="fetch and save NIP-17 history, then stop after relay history is complete")
     action.add_argument("--db-msg", action="store_true", help="list saved Nostr messages")
+    action.add_argument("--db-msg-show", type=int, metavar="ID", help="show one saved Nostr message and its lifecycle")
+    action.add_argument("--msg-done", nargs=2, metavar=("ID", "REPORT"), help="mark a received message handled with REPORT")
+    action.add_argument("--msg-reply", nargs=2, metavar=("ID", "TEXT"), help="reply to a handled received message by local ID")
     action.add_argument("--db-str", action="store_true", help="list saved public stream events")
     action.add_argument("--db-show", type=int, metavar="ID", help="show a stream event by its --db-str #ID")
     action.add_argument("--flw-add", nargs=2, metavar=("NAME", "PUBKEY"), help="add or update a follow")
@@ -1395,10 +1704,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--user",
         default=DEFAULT_PROFILE_NAME,
         metavar="PROFILE",
-        help="select PROFILE from nostr/profiles.json (default: user1)",
+        help="select PROFILE from data_nostr/profiles.json (default: user1)",
     )
     parser.add_argument("--profiles", type=Path, default=DEFAULT_PROFILES_PATH, metavar="PATH", help="profiles JSON file")
-    parser.add_argument("--force", action="store_true", help="allow replacing an existing key with --key-create or --profile-create")
+    parser.add_argument("--force", action="store_true", help="allow replacing a key or sending an additional recorded reply")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="show detailed connection status")
     parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
     return parser
@@ -1421,18 +1730,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         return show_key_info(args)
     if args.config:
         return show_config(args)
+    if args.doctor:
+        return doctor(args)
     if args.connect:
         return connect_relays(args)
     if args.stream:
         return stream_events(args)
     if args.event is not None:
         return publish_public_event(args)
+    if args.dm_relays_publish:
+        return publish_dm_relay_list(args)
+    if args.dm_inbox:
+        return inspect_dm_inbox(args)
     if args.msg:
         return send_friend_message(args)
     if args.receive:
         return receive_friend_messages(args)
+    if args.sync:
+        return sync_friend_messages(args)
     if args.db_msg:
         return list_message_database(args)
+    if args.db_msg_show is not None:
+        return show_message(args)
+    if args.msg_done:
+        return mark_message_done(args)
+    if args.msg_reply:
+        return reply_to_message(args)
     if args.db_str:
         return list_stream_database(args)
     if args.db_show is not None:

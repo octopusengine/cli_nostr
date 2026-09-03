@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "columns": [
+    {"field": "uid", "name": "id", "width": 5},
+    {"field": "project", "name": "project", "width": 20},
+    {"field": "selector", "name": "selector", "width": 10},
+    {"field": "model", "name": "model", "width": 20},
+    {"field": "prompt", "name": "prompt", "width": 20},
+    {"field": "answer", "name": "answer", "width": 20},
+    {"field": "key1", "name": "time", "width": 5}
+  ]
+}

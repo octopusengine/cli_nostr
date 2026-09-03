@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "columns": [
+    {"field": "uid", "name": "id", "width": 5},
+    {"field": "added_at", "name": "added", "width": 14},
+    {"field": "name", "name": "name", "width": 24},
+    {"field": "pubkey", "name": "pubkey", "width": 48}
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "profiles": {
+    "user1": {
+      "name": "cli_nostr",
+      "pub_key": "npub15746v626mera3sqr68vpwvvtzy3vedqyxv58f3h8e5kj53sfe2ys4aevha",
+      "priv_key_name": "NOSTR_KEY",
+      "dm_relays": [
+        "wss://relay.damus.io",
+        "wss://nos.lol",
+        "wss://relay.snort.social/"
+      ]
+    },
+    "user2": {
+      "name": "clinostr2",
+      "pub_key": "npub1fnz594map7ukky98vht7t87mvgtjetc99r35hqk0mkcwlq6c2tasda066h",
+      "priv_key_name": "NOSTR_KEY2",
+      "dm_relays": [
+        "wss://relay.damus.io",
+        "wss://nos.lol",
+        "wss://relay.snort.social/"
+      ]
+    }
+  }
+}

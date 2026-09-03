@@ -14,6 +14,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit, urlunsplit
+from urllib.request import Request, urlopen
 
 __version__ = "0.25.02"
 
@@ -77,6 +80,42 @@ def probe_relay(relay_url: str, timeout: float, verbose: int) -> tuple[bool, str
     finally:
         loop.stop()
         loop.close(all_fds=True)
+
+
+def relay_info_url(relay_url: str) -> str:
+    """Convert a WebSocket relay URL to its NIP-11 HTTP information endpoint."""
+
+    parsed = urlsplit(relay_url)
+    if parsed.scheme not in {"ws", "wss"} or not parsed.netloc:
+        raise NostrError(f"Invalid relay URL: {relay_url!r}")
+    scheme = "https" if parsed.scheme == "wss" else "http"
+    return urlunsplit((scheme, parsed.netloc, parsed.path or "/", "", ""))
+
+
+def fetch_relay_info(relay_url: str, timeout: float) -> tuple[dict[str, object] | None, str]:
+    """Read optional NIP-11 relay metadata without treating its absence as failure."""
+
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+        raise NostrError("Relay information timeout must be a positive number.")
+    info_url = relay_info_url(relay_url)
+    request = Request(
+        info_url,
+        headers={"Accept": "application/nostr+json", "User-Agent": "cli-nostr/0.2"},
+    )
+    try:
+        with urlopen(request, timeout=float(timeout)) as response:
+            payload = response.read().decode("utf-8")
+    except HTTPError as error:
+        return None, f"NIP-11 HTTP {error.code}"
+    except (URLError, OSError, TimeoutError, UnicodeDecodeError) as error:
+        return None, f"NIP-11 unavailable: {type(error).__name__}"
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        return None, "NIP-11 response is not JSON"
+    if not isinstance(data, dict):
+        return None, "NIP-11 response is not an object"
+    return data, "NIP-11 OK"
 
 
 def connect_relays(relays_path: Path, timeout: float, verbose: int) -> int:

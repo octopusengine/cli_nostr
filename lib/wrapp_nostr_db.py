@@ -1,6 +1,6 @@
 """Shared SQLite storage for local Nostr databases.
 
-The JSON schemas in ``data/`` are loaded whenever a database is initialized.
+The JSON schemas in ``data_nostr/`` are loaded whenever a database is initialized.
 They contain the base SQL definitions and any additive migrations; this module
 keeps the application-specific read/write helpers in one place.
 """
@@ -15,12 +15,12 @@ from pathlib import Path
 from typing import Iterable
 
 
-__version__ = "0.26.03"
+__version__ = "0.26.04"
 
-DATA_PATH = Path(__file__).resolve().parents[1] / "data"
-DEFAULT_NOSTR_MESSAGES_DATABASE_PATH = Path("data") / "nostr_msg.db"
-DEFAULT_NOSTR_STREAM_DATABASE_PATH = Path("data") / "nostr_stream.db"
-DEFAULT_NOSTR_FOLLOWS_DATABASE_PATH = Path("data") / "nostr_follows.db"
+DATA_PATH = Path(__file__).resolve().parents[1] / "data_nostr"
+DEFAULT_NOSTR_MESSAGES_DATABASE_PATH = Path("data_nostr") / "nostr_msg.db"
+DEFAULT_NOSTR_STREAM_DATABASE_PATH = Path("data_nostr") / "nostr_stream.db"
+DEFAULT_NOSTR_FOLLOWS_DATABASE_PATH = Path("data_nostr") / "nostr_follows.db"
 NOSTR_MESSAGES_SCHEMA_PATH = DATA_PATH / "nostr_msg.json"
 NOSTR_STREAM_SCHEMA_PATH = DATA_PATH / "nostr_stream.json"
 NOSTR_FOLLOWS_SCHEMA_PATH = DATA_PATH / "nostr_follows.json"
@@ -157,6 +157,102 @@ def list_messages(database_path: Path, limit: int = 100) -> list[sqlite3.Row]:
     return _query_rows(database_path, "SELECT * FROM nostr_messages ORDER BY saved_at DESC, uid DESC LIMIT ?", (limit,), "Nostr messages")
 
 
+def get_message(database_path: Path, uid: int) -> sqlite3.Row | None:
+    """Return one direct message, including its local handling and reply state."""
+
+    if isinstance(uid, bool) or not isinstance(uid, int) or uid < 1:
+        raise NostrDatabaseError("Message ID must be a positive integer.")
+    create_message_database(database_path)
+    rows = _query_rows(database_path, "SELECT * FROM nostr_messages WHERE uid = ?", (uid,), "Nostr message")
+    return rows[0] if rows else None
+
+
+def message_event_ids(database_path: Path) -> set[str]:
+    """Return every saved gift-wrap ID for deduplication by an interactive client."""
+
+    create_message_database(database_path)
+    try:
+        with sqlite3.connect(database_path) as connection:
+            return {str(row[0]) for row in connection.execute("SELECT event_id FROM nostr_messages")}
+    except sqlite3.Error as error:
+        raise NostrDatabaseError(f"Cannot read Nostr message IDs from {database_path}: {error}") from error
+
+
+def message_summary(database_path: Path) -> dict[str, int]:
+    """Return small local counts suitable for an interactive status line."""
+
+    create_message_database(database_path)
+    try:
+        with sqlite3.connect(database_path) as connection:
+            row = connection.execute(
+                """SELECT COUNT(*) AS total,
+                          SUM(CASE WHEN direction = 'received' THEN 1 ELSE 0 END) AS received,
+                          SUM(CASE WHEN direction = 'received' AND handled_at IS NULL THEN 1 ELSE 0 END) AS pending,
+                          SUM(CASE WHEN direction = 'received' AND handled_at IS NOT NULL THEN 1 ELSE 0 END) AS handled,
+                          SUM(CASE WHEN direction = 'received' AND replied_at IS NOT NULL THEN 1 ELSE 0 END) AS replied
+                   FROM nostr_messages"""
+            ).fetchone()
+    except sqlite3.Error as error:
+        raise NostrDatabaseError(f"Cannot summarize Nostr messages in {database_path}: {error}") from error
+    assert row is not None
+    return {name: int(value or 0) for name, value in zip(("total", "received", "pending", "handled", "replied"), row)}
+
+
+def mark_message_handled(database_path: Path, uid: int, report: str) -> None:
+    """Record that an incoming message was handled, without sending a reply."""
+
+    if not isinstance(report, str) or not report.strip():
+        raise NostrDatabaseError("Handling report must be non-empty text.")
+    row = get_message(database_path, uid)
+    if row is None:
+        raise NostrDatabaseError(f"Message #{uid} was not found.")
+    if row["direction"] != "received":
+        raise NostrDatabaseError("Only received messages can be marked as handled.")
+    handled_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        with sqlite3.connect(database_path) as connection:
+            connection.execute(
+                "UPDATE nostr_messages SET handled_at = ?, handling_report = ? WHERE uid = ?",
+                (handled_at, report.strip(), uid),
+            )
+    except sqlite3.Error as error:
+        raise NostrDatabaseError(f"Cannot update Nostr message #{uid}: {error}") from error
+
+
+def record_message_reply(
+    database_path: Path,
+    uid: int,
+    *,
+    event_id: str,
+    status: str,
+    content: str,
+) -> None:
+    """Attach one reply attempt and its delivery outcome to a received message."""
+
+    if not isinstance(event_id, str) or not event_id:
+        raise NostrDatabaseError("Reply event ID must be non-empty text.")
+    if not isinstance(status, str) or not status:
+        raise NostrDatabaseError("Reply status must be non-empty text.")
+    if not isinstance(content, str) or not content.strip():
+        raise NostrDatabaseError("Reply content must be non-empty text.")
+    row = get_message(database_path, uid)
+    if row is None:
+        raise NostrDatabaseError(f"Message #{uid} was not found.")
+    if row["direction"] != "received":
+        raise NostrDatabaseError("Only received messages can have a reply recorded.")
+    replied_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        with sqlite3.connect(database_path) as connection:
+            connection.execute(
+                """UPDATE nostr_messages
+                   SET replied_at = ?, reply_event_id = ?, reply_status = ?, reply_content = ?
+                   WHERE uid = ?""",
+                (replied_at, event_id, status, content, uid),
+            )
+    except sqlite3.Error as error:
+        raise NostrDatabaseError(f"Cannot record reply for Nostr message #{uid}: {error}") from error
+
+
 def record_event(database_path: Path, *, relay: str, event_id: str, created_at: int | None, kind: int,
                  tags: list[list[object]], author_pubkey: str, content: str, event_json: dict[str, object]) -> int:
     """Save one public event once, updating its relay and metadata on repeats."""
@@ -286,7 +382,20 @@ def display_datetime(value: object) -> str:
 
 
 def format_message_rows(rows: Iterable[sqlite3.Row], content_width: int = 48) -> list[str]:
-    return [f"#{row['uid']} | {display_datetime(row['saved_at'])} | {row['direction']} | {row['friend_name'] or '-'} | {short_text(row['content'], content_width)}" for row in rows]
+    def lifecycle(row: sqlite3.Row) -> str:
+        if row["direction"] == "sent":
+            return row["delivery_status"]
+        if row["replied_at"]:
+            return f"replied ({row['reply_status'] or 'unknown'})"
+        if row["handled_at"]:
+            return "handled"
+        return "received"
+
+    return [
+        f"#{row['uid']} | {display_datetime(row['saved_at'])} | {row['direction']} | "
+        f"{lifecycle(row)} | {row['friend_name'] or '-'} | {short_text(row['content'], content_width)}"
+        for row in rows
+    ]
 
 
 def format_event_rows(rows: Iterable[sqlite3.Row]) -> list[str]:
