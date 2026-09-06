@@ -61,6 +61,62 @@ python cli_nostr.py --follow-stream 3
 
 ## Profiles / keys
 
+### Standalone key generation and vanity search
+
+```powershell
+python cli_nostr.py --key-generate
+python cli_nostr.py --key-generate --vanity "acx"
+python cli_nostr.py --key-generate --vanity "acx" 5
+python cli_nostr.py --key-generate --vanity "*acx" 2
+python cli_nostr.py --key-generate --vanity "jame|jam3|j4m3" 3
+```
+
+These commands run offline without profiles or configuration. Plain generation
+creates one key; vanity defaults to three distinct public keys. A plain pattern
+matches immediately after `npub1`; a leading `*` searches anywhere after `npub1`,
+including the checksum. Patterns are lowercase literal strings, not regexes.
+Separate alternatives with `|` inside quotes (required to prevent shell piping),
+for example `"jame|jam3|j4m3"` or `"*jame|*jam3|*j4m3"`.
+Each candidate is checked against all alternatives; any match is accepted.
+N is the total number of distinct addresses across all alternatives, not per
+alternative. Overlapping alternatives count an address only once. Numeric
+patterns are unambiguous: `--vanity "234|567" 3` finds three total addresses.
+The Bech32 alphabet is `qpzry9x8gf2tvdw0s3jn54khce6mua7l`:
+`b`, `i`, `o`, and `1` are unavailable, so `abc` is rejected.
+Invalid-pattern errors include the complete allowed alphabet. Bech32 uses the
+implementation bundled with the existing `pynostr` dependency; no standalone
+`bech32` package or duplicate local codec is needed.
+
+Output is `nostr_temp_YYMMDD_HHMM.txt` in the current directory, using local time.
+Existing files are preserved by adding `_1`, `_2`, etc. Each record contains
+the private key as 64 hex characters, the `npub`, then the public key as 64 hex
+characters, with a blank line between records. This file contains plaintext
+private keys and is excluded by `.gitignore`. Each match is flushed to disk
+before its public address is announced. Progress appears every 100,000 attempted keys;
+Ctrl+C retains saved matches and returns exit code 130. Long patterns can take
+a very long time: a short prefix of length k needs roughly 32^k attempts per match.
+
+### Changes imported from `zmeny` and portability
+
+`--relays` lists configured relays without contacting them. The optional
+`"stream": {"allowed": ["npub1…", "64-character public hex key"]}` section in
+`cli_nostr.json` adds public authors to `--follow-stream`, alongside saved
+follows. Duplicate public keys are merged, preserving saved follow names.
+This setting does not change direct-message authorization. The imported
+`suppress_wait_output` behavior supports quiet embedding by callers.
+
+For transfer back to the other project, copy `cli_nostr.py`,
+`lib/nostr_runner.py`, `lib/wrapp_nostr.py`, `lib_nostr/tools.py`, and
+`requirements_nostr.txt`. Also carry over the `nostr_temp_*.txt` Git ignore rule.
+The receiving project must also retain this project's existing `lib` wrappers
+and `lib_nostr` package used by those files. Install the CLI dependencies with
+`python -m pip install -r requirements_nostr.txt`; the existing
+`requirements.txt` additionally includes the PyQt6 messenger dependency.
+`stream.allowed` is optional, so existing configuration remains usable.
+Generated keys, `.env`, and local databases are not part of the transfer.
+
+Run offline regression checks with `python -m unittest discover -s tests -v`.
+
 The default identity is profile `user1` in `data_nostr/profiles.json`. Use
 `--user PROFILE` to select another profile. The selected profile supplies its
 display name, public `npub`, and `priv_key_name`; the latter names the private

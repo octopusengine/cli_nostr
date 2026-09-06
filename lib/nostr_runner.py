@@ -163,7 +163,7 @@ def send_nip17_message(
         from pynostr.key import PrivateKey
         from lib_nostr import nip17
     except ModuleNotFoundError as error:
-        raise NostrRunnerError("Install Nostr dependencies with: python -m pip install -r requirements.txt") from error
+        raise NostrRunnerError("Install Nostr dependencies with: python -m pip install -r requirements_nostr.txt") from error
 
     try:
         sender_key = PrivateKey.from_hex(private_key_hex)

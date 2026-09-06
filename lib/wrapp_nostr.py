@@ -60,7 +60,7 @@ def nostr_runtime() -> tuple[object, ...]:
         from pynostr.message_type import RelayMessageType
         from pynostr.relay import Relay
     except ModuleNotFoundError as error:
-        raise NostrError("Install relay dependencies with: python -m pip install -r requirements.txt") from error
+        raise NostrError("Install relay dependencies with: python -m pip install -r requirements_nostr.txt") from error
     return (tornado.ioloop, gen, websocket_connect, RelayPolicy, Event, Filters, FiltersList, MessagePool, RelayMessageType, Relay)
 
 
@@ -241,7 +241,7 @@ def friend_public_key(value: str) -> object:
     try:
         from pynostr.key import PublicKey
     except ModuleNotFoundError as error:
-        raise NostrError("Install message dependencies with: python -m pip install -r requirements.txt") from error
+        raise NostrError("Install message dependencies with: python -m pip install -r requirements_nostr.txt") from error
     if value.startswith("npub1"):
         return PublicKey.from_npub(value)
     if len(value) == 64 and all(char in "0123456789abcdefABCDEF" for char in value):

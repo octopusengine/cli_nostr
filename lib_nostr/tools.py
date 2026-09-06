@@ -60,16 +60,13 @@ def normalize_nostr_private_key(value):
     key = str(value).strip().strip('"').strip("'")
 
     if key.startswith("nsec1"):
-        try:
-            from bech32 import bech32_decode, convertbits
-        except ModuleNotFoundError as exc:
-            raise RuntimeError("bech32 is required for nsec1 keys. Install requirements with the same Python used to run the script.") from exc
+        from pynostr.bech32 import Encoding, bech32_decode, convertbits
 
-        hrp, data = bech32_decode(key)
-        if hrp != "nsec" or data is None:
+        hrp, data, encoding = bech32_decode(key)
+        if hrp != "nsec" or data is None or encoding != Encoding.BECH32:
             raise ValueError("Invalid nsec private key")
         decoded = convertbits(data, 5, 8, False)
-        if decoded is None:
+        if decoded is None or len(decoded) != 32:
             raise ValueError("Invalid nsec private key payload")
         key = bytes(decoded).hex()
 

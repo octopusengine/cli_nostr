@@ -22,7 +22,7 @@ from lib import wrapp_nostr as nostr
 from lib.wrapp_terminal import Terminal
 
 
-__version__ = "0.2.5"
+__version__ = "0.2.6"
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 LIBRARY_DIR = PROJECT_ROOT / "lib"
@@ -495,6 +495,17 @@ def _setup_bool(setup: dict[str, object], name: str, default: bool) -> bool:
     return value
 
 
+def _setup_stream_allowed(setup: dict[str, object]) -> tuple[str, ...]:
+    """Read the optional public-author list used exclusively by follow stream."""
+    stream = setup.get("stream", {})
+    if not isinstance(stream, dict):
+        raise CliNostrError(f"stream in {DEFAULT_SETUP_PATH} must be an object.")
+    allowed = stream.get("allowed", [])
+    if not isinstance(allowed, list) or not all(isinstance(value, str) and value.strip() for value in allowed):
+        raise CliNostrError(f"stream.allowed in {DEFAULT_SETUP_PATH} must be a list of non-empty public keys.")
+    return tuple(dict.fromkeys(value.strip() for value in allowed))
+
+
 def apply_setup(args: argparse.Namespace) -> None:
     """Attach fixed runtime settings from cli_nostr.json to parsed CLI actions."""
 
@@ -515,6 +526,7 @@ def apply_setup(args: argparse.Namespace) -> None:
     args.timeout = _setup_positive_number(setup, "timeout", 8)
     args.follow_stream_timeout = _setup_positive_number(setup, "follow_stream_timeout", 100)
     args.save_stream_to_db = _setup_bool(setup, "save_stream_to_db", True)
+    args.stream_allowed = _setup_stream_allowed(setup)
     args.user_profile = select_user_profile(args.profiles, args.user)
     args.key_env = args.user_profile.priv_key_name
     args.pub_key = args.user_profile.pub_key
@@ -728,7 +740,7 @@ def build_public_event(args: argparse.Namespace, content: str) -> object:
         from pynostr.key import PrivateKey
     except ModuleNotFoundError as error:
         raise CliNostrError(
-            "Install event dependencies with: python -m pip install -r requirements.txt"
+            "Install event dependencies with: python -m pip install -r requirements_nostr.txt"
         ) from error
     private_value = get_env_value(args.key_env, args.env)
     if not private_value:
@@ -778,7 +790,7 @@ def publish_dm_relay_list(args: argparse.Namespace) -> int:
         from pynostr.event import Event
         from pynostr.key import PrivateKey
     except ModuleNotFoundError as error:
-        raise CliNostrError("Install event dependencies with: python -m pip install -r requirements.txt") from error
+        raise CliNostrError("Install event dependencies with: python -m pip install -r requirements_nostr.txt") from error
     private_value = get_env_value(args.key_env, args.env)
     if not private_value:
         raise CliNostrError(f"{args.key_env} is not set in {args.env} or the environment.")
@@ -884,7 +896,8 @@ def send_friend_message(args: argparse.Namespace) -> int:
     relay_limit = message_relay_limit(args)
     relay_urls = select_live_relays(args, relay_limit)
     if not relay_urls:
-        print("No configured relay is available.", file=sys.stderr)
+        if not getattr(args, "suppress_wait_output", False):
+            print("No configured relay is available.", file=sys.stderr)
         return 3
 
     sender_value = get_env_value(args.key_env, args.env)
@@ -950,7 +963,8 @@ def receive_friend_messages(args: argparse.Namespace) -> int:
     relay_limit = message_relay_limit(args)
     relay_urls = select_live_relays(args, relay_limit)
     if not relay_urls:
-        print("No configured relay is available.", file=sys.stderr)
+        if not getattr(args, "suppress_wait_output", False):
+            print("No configured relay is available.", file=sys.stderr)
         return 3
     wait_timeout = message_wait_timeout(args)
     lookback = message_lookback_seconds(args)
@@ -960,7 +974,7 @@ def receive_friend_messages(args: argparse.Namespace) -> int:
         from lib_nostr import nip17
     except ModuleNotFoundError as error:
         raise CliNostrError(
-            "Install message-receiving dependencies with: python -m pip install -r requirements.txt"
+            "Install message-receiving dependencies with: python -m pip install -r requirements_nostr.txt"
         ) from error
     (
         tornado_ioloop,
@@ -1320,7 +1334,7 @@ def stream_events(args: argparse.Namespace) -> int:
 
 
 def followed_authors(args: argparse.Namespace) -> tuple[list[str], dict[str, str]]:
-    """Read every follow and convert its public key to a Nostr author filter."""
+    """Read saved follows and stream.allowed authors for the public filter."""
 
     try:
         from lib.wrapp_nostr_db import NostrFollowDatabaseError, list_all_follows
@@ -1328,9 +1342,6 @@ def followed_authors(args: argparse.Namespace) -> tuple[list[str], dict[str, str
         follows = list_all_follows(args.follows_db)
     except (NostrFollowDatabaseError, OSError, ValueError) as error:
         raise CliNostrError(str(error)) from error
-    if not follows:
-        raise CliNostrError(f"No follows are stored in {args.follows_db}. Add one with --flw-add first.")
-
     author_names: dict[str, str] = {}
     for follow in follows:
         try:
@@ -1338,6 +1349,14 @@ def followed_authors(args: argparse.Namespace) -> tuple[list[str], dict[str, str
         except CliNostrError as error:
             raise CliNostrError(f"Follow {follow['name']!r} has an invalid public key: {error}") from error
         author_names[public_key] = str(follow["name"])
+    for value in getattr(args, "stream_allowed", ()):
+        try:
+            public_key = friend_public_key(str(value)).hex()
+        except (CliNostrError, ValueError) as error:
+            raise CliNostrError(f"stream.allowed contains an invalid public key: {error}") from error
+        author_names.setdefault(public_key, f"allowed-{public_key[:12]}")
+    if not author_names:
+        raise CliNostrError(f"No public stream authors are configured. Add one with --flw-add or stream.allowed.")
     return list(author_names), author_names
 
 
@@ -1491,6 +1510,94 @@ def generate_private_key_hex() -> str:
             return f"{value:064x}"
 
 
+BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+
+
+def vanity_options(values: list[str] | None) -> tuple[list[tuple[str, bool]], int]:
+    """Validate pipe-separated prefix/*substring alternatives and total count."""
+    if values is None:
+        return [("", False)], 1
+    if not 1 <= len(values) <= 2:
+        raise CliNostrError('Use --vanity "PATTERN|PATTERN" [N].')
+    patterns: list[tuple[str, bool]] = []
+    for variant in values[0].split("|"):
+        variant = variant.strip()
+        anywhere = variant.startswith("*")
+        pattern = variant[1:] if anywhere else variant
+        if not pattern or any(char not in BECH32_CHARSET for char in pattern):
+            raise CliNostrError(
+                f"Invalid vanity variant {variant!r}. "
+                f"Vanity pattern must use lowercase Bech32 characters: {BECH32_CHARSET}. "
+                "Characters b, i, o and 1 are not allowed; use e.g. acx instead of abc."
+            )
+        if len(pattern) > 58:
+            raise CliNostrError("Vanity pattern cannot exceed the 58 characters after npub1.")
+        # The 52nd payload character has one key bit and four zero padding bits.
+        if not anywhere and len(pattern) >= 52 and pattern[51] not in "qs":
+            raise CliNostrError("The 52nd character after npub1 must be q or s (Bech32 padding).")
+        if (pattern, anywhere) not in patterns:
+            patterns.append((pattern, anywhere))
+    try:
+        count = int(values[1]) if len(values) == 2 else 3
+    except ValueError as error:
+        raise CliNostrError("Vanity N must be a positive whole number.") from error
+    if count < 1:
+        raise CliNostrError("Vanity N must be a positive whole number.")
+    return patterns, count
+
+
+def generate_keys(args: argparse.Namespace) -> int:
+    """Save each match immediately; never print a private key or replace a file."""
+    patterns, count = vanity_options(args.vanity)
+    try:
+        from pynostr.key import PrivateKey
+    except ModuleNotFoundError as error:
+        raise CliNostrError("Install dependencies with: python -m pip install -r requirements_nostr.txt") from error
+    stem = f"nostr_temp_{datetime.now():%y%m%d_%H%M}"
+    path = Path(f"{stem}.txt")
+    suffix = 0
+    found = attempts = 0
+    started = time.monotonic()
+    seen: set[str] = set()
+    try:
+        while True:
+            try:
+                descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                break
+            except FileExistsError:
+                suffix += 1
+                path = Path(f"{stem}_{suffix}.txt")
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as output:
+            print(f"Generating {count} key(s); output: {path.resolve()}", flush=True)
+            try:
+                while found < count:
+                    secret = generate_private_key_hex()
+                    public = PrivateKey.from_hex(secret).public_key
+                    public_hex = public.hex()
+                    npub = public.bech32()
+                    attempts += 1
+                    body = npub[5:]
+                    matches = any(pattern in body if anywhere else body.startswith(pattern)
+                                  for pattern, anywhere in patterns)
+                    if matches and npub not in seen:
+                        output.write(f"{secret}\n{npub}\n{public_hex}\n\n")
+                        output.flush()
+                        os.fsync(output.fileno())
+                        seen.add(npub)
+                        found += 1
+                        print(f"Found {found}/{count}: {npub} (attempts: {attempts})", flush=True)
+                    if attempts % 100_000 == 0 and found < count:
+                        now = time.monotonic()
+                        print(f"Searched {attempts} keys; {found}/{count} found; {attempts / max(now - started, 0.001):.0f} keys/s", flush=True)
+            except KeyboardInterrupt:
+                print(f"\nInterrupted. Saved {found}/{count} key(s) to {path.resolve()}.", flush=True)
+                return 130
+    except OSError as error:
+        raise CliNostrError(f"Cannot save generated keys to {path}: {error}") from error
+    print(f"Saved {found} key(s) to {path.resolve()}.")
+    return 0
+
+
 def read_dotenv(path: Path) -> dict[str, str]:
     """Read simple dotenv assignments without modifying process environment."""
 
@@ -1579,7 +1686,7 @@ def normalize_private_key(value: str) -> str:
     if len(key) != 64 or not all(char in "0123456789abcdefABCDEF" for char in key):
         if key.startswith("nsec1"):
             raise CliNostrError(
-                "NOSTR_KEY is nsec1…; install dependencies from requirements.txt to inspect it."
+                "NOSTR_KEY is nsec1…; install dependencies from requirements_nostr.txt to inspect it."
             )
         raise CliNostrError("NOSTR_KEY must have 64 hexadecimal characters or use the nsec1… format.")
     number = int(key, 16)
@@ -1595,7 +1702,7 @@ def private_key_to_public_npub(secret: str) -> str:
         from pynostr.key import PrivateKey
     except ModuleNotFoundError as error:
         raise CliNostrError(
-            "Install dependencies for --key-info with: python -m pip install -r requirements.txt"
+            "Install dependencies for --key-info with: python -m pip install -r requirements_nostr.txt"
         ) from error
     return PrivateKey.from_hex(secret).public_key.bech32()
 
@@ -1699,6 +1806,16 @@ def show_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def show_relays(args: argparse.Namespace) -> int:
+    """Print the configured relay pins without opening a network connection."""
+
+    relays = configured_relays(args)
+    print(f"Configured relays ({len(relays)}):")
+    for number, relay_url in enumerate(relays, start=1):
+        print(f"{number}. {relay_url}")
+    return 0
+
+
 def doctor(args: argparse.Namespace) -> int:
     """Check local Nostr prerequisites without contacting relays or exposing keys."""
 
@@ -1720,11 +1837,10 @@ def doctor(args: argparse.Namespace) -> int:
     agent = load_setup(DEFAULT_SETUP_PATH).get("agent", {})
     if isinstance(agent, dict):
         enabled = agent.get("enabled", False)
-        allowed = agent.get("allowed_senders", [])
-        checks.append(("Agent policy", isinstance(enabled, bool) and isinstance(allowed, list),
-                       f"{'enabled' if enabled else 'disabled'}; {len(allowed) if isinstance(allowed, list) else '?'} allowed sender(s)"))
+        checks.append(("Agent policy", isinstance(enabled, bool), f"{'enabled' if enabled else 'disabled'}; direct messages use friends.json"))
     else:
         checks.append(("Agent policy", False, "agent in cli_nostr.json must be an object"))
+    checks.append(("Stream allowed", True, f"{len(args.stream_allowed)} configured public author(s)"))
 
     failed = 0
     terminal = Terminal()
@@ -1741,8 +1857,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--key-create", action="store_true", help="generate and save the selected private key to .env")
+    action.add_argument("--key-generate", action="store_true", help="generate offline keys into nostr_temp_YYMMDD_HHMM.txt")
     action.add_argument("--key-info", action="store_true", help="show the selected identity public key")
     action.add_argument("--config", action="store_true", help="show NOSTR configuration status without secrets")
+    action.add_argument("--relays", dest="list_relays", action="store_true", help="list configured relay pins without contacting them")
     action.add_argument("--doctor", action="store_true", help="check local Nostr setup without contacting relays")
     action.add_argument("-L", "--lib-version", action="store_true", help="show versions of local wrapper modules used by this CLI")
     action.add_argument("--examples", action="store_true", help="show command examples")
@@ -1797,8 +1915,9 @@ def build_parser() -> argparse.ArgumentParser:
         const=0,
         default=None,
         metavar="DAYS",
-        help="stream saved follows; optionally fetch DAYS of history first",
+        help="stream saved follows and stream.allowed authors; optionally fetch DAYS of history first",
     )
+    parser.add_argument("--vanity", nargs="+", metavar="PATTERN_OR_N", help='with --key-generate: "PATTERN|PATTERN" [N], default N=3 total; each variant is a prefix or *substring after npub1')
     parser.add_argument("--env", type=Path, default=DEFAULT_ENV_PATH, metavar="PATH", help=".env file (default: .env)")
     parser.add_argument(
         "--user",
@@ -1817,6 +1936,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_console_encoding()
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.vanity is not None and not args.key_generate:
+        parser.error("--vanity requires --key-generate.")
+    if args.key_generate:
+        return generate_keys(args)
     if args.lib_version:
         return show_library_versions()
     if args.examples:
@@ -1830,6 +1953,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return show_key_info(args)
     if args.config:
         return show_config(args)
+    if args.list_relays:
+        return show_relays(args)
     if args.doctor:
         return doctor(args)
     if args.connect:
